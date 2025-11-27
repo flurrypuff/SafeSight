@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion } from "motion/react";
 import { Phone, PhoneCall } from "lucide-react";
-import { CameraFeed, CameraFeedRef } from "./components/CameraFeed";
+// --- CHANGE 1: Import the new LiveStream component ---
+import LiveStream, { LiveStreamRef } from "./components/CameraFeed"; 
+// Note: If you put LiveStream in the components folder, change path to: "./components/LiveStream"
 import { RiskDetection } from "./components/RiskDetection";
 import { RiskHistory } from "./components/RiskHistory";
 import { SystemOverview } from "./components/SystemOverview";
@@ -59,7 +61,7 @@ interface RecordedVideo {
   videoUrl: string;
 }
 
-// Mock data
+// Mock data generation functions
 const generateMockRisks = (): Risk[] => {
   const riskTypes = [
     "Violence/Abuse",
@@ -80,67 +82,35 @@ const generateMockRisks = (): Risk[] => {
     { length: Math.floor(Math.random() * 4) },
     (_, i) => ({
       id: `risk-${i}`,
-      type: riskTypes[
-        Math.floor(Math.random() * riskTypes.length)
-      ],
-      severity: ["low", "medium", "high", "critical"][
-        Math.floor(Math.random() * 4)
-      ] as Risk["severity"],
+      type: riskTypes[Math.floor(Math.random() * riskTypes.length)],
+      severity: ["low", "medium", "high", "critical"][Math.floor(Math.random() * 4)] as Risk["severity"],
       confidence: Math.floor(Math.random() * 40) + 60,
-      description:
-        descriptions[
-          Math.floor(Math.random() * descriptions.length)
-        ],
+      description: descriptions[Math.floor(Math.random() * descriptions.length)],
       timestamp: new Date(Date.now() - Math.random() * 3600000),
-      status: ["active", "tracking"][
-        Math.floor(Math.random() * 2)
-      ] as Risk["status"],
+      status: ["active", "tracking"][Math.floor(Math.random() * 2)] as Risk["status"],
     }),
   );
 };
 
 const generateHistoricalRisks = (): HistoricalRisk[] => {
-  const riskTypes = [
-    "Violence/Abuse",
-    "Fire Hazard",
-    "Sharp Object Detected",
-    "Slippery Floor",
-    "Signs of Passing Out",
-  ];
-  const locations = [
-    "Living Room",
-    "Kitchen",
-    "Dining Area",
-    "Bathroom",
-    "Bedroom",
-  ];
+  const riskTypes = ["Violence/Abuse", "Fire Hazard", "Sharp Object Detected", "Slippery Floor", "Signs of Passing Out"];
+  const locations = ["Living Room", "Kitchen", "Dining Area", "Bathroom", "Bedroom"];
 
   return Array.from({ length: 25 }, (_, i) => ({
     id: `hist-${i}`,
-    type: riskTypes[
-      Math.floor(Math.random() * riskTypes.length)
-    ],
-    severity: ["low", "medium", "high", "critical"][
-      Math.floor(Math.random() * 4)
-    ] as HistoricalRisk["severity"],
+    type: riskTypes[Math.floor(Math.random() * riskTypes.length)],
+    severity: ["low", "medium", "high", "critical"][Math.floor(Math.random() * 4)] as HistoricalRisk["severity"],
     confidence: Math.floor(Math.random() * 40) + 60,
     description: `Historical risk event #${i + 1}`,
-    timestamp: new Date(
-      Date.now() - Math.random() * 7 * 24 * 3600000,
-    ),
+    timestamp: new Date(Date.now() - Math.random() * 7 * 24 * 3600000),
     duration: Math.floor(Math.random() * 600) + 30,
-    status: ["resolved", "escalated", "false-positive"][
-      Math.floor(Math.random() * 3)
-    ] as HistoricalRisk["status"],
-    location:
-      locations[Math.floor(Math.random() * locations.length)],
+    status: ["resolved", "escalated", "false-positive"][Math.floor(Math.random() * 3)] as HistoricalRisk["status"],
+    location: locations[Math.floor(Math.random() * locations.length)],
   }));
 };
 
-const generateDetectedRisks = (
-  activeRisks: Risk[],
-): RiskDetection[] => {
-  return activeRisks.map((risk, i) => ({
+const generateDetectedRisks = (activeRisks: Risk[]): RiskDetection[] => {
+  return activeRisks.map((risk) => ({
     id: risk.id,
     type: risk.type,
     confidence: risk.confidence,
@@ -154,24 +124,16 @@ const generateDetectedRisks = (
 export default function App() {
   const [isRecording, setIsRecording] = useState(false);
   const [currentRisks, setCurrentRisks] = useState<Risk[]>([]);
-  const [historicalRisks] = useState<HistoricalRisk[]>(
-    generateHistoricalRisks(),
-  );
-  const [detectedRisks, setDetectedRisks] = useState<
-    RiskDetection[]
-  >([]);
+  const [historicalRisks] = useState<HistoricalRisk[]>(generateHistoricalRisks());
+  const [detectedRisks, setDetectedRisks] = useState<RiskDetection[]>([]);
   const [totalDetections, setTotalDetections] = useState(147);
-  const [systemStatus] = useState<
-    "online" | "offline" | "warning"
-  >("online");
-  const [capturedImages, setCapturedImages] = useState<
-    CapturedImage[]
-  >([]);
-  const [recordedVideos, setRecordedVideos] = useState<
-    RecordedVideo[]
-  >([]);
+  const [systemStatus] = useState<"online" | "offline" | "warning">("online");
+  const [capturedImages, setCapturedImages] = useState<CapturedImage[]>([]);
+  const [recordedVideos, setRecordedVideos] = useState<RecordedVideo[]>([]);
   
-  const cameraFeedRef = useRef<CameraFeedRef>(null);
+  // --- CHANGE 2: Updated Ref type for the new component ---
+  const liveStreamRef = useRef<LiveStreamRef>(null);
+  
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
   const recordingStartTimeRef = useRef<number>(0);
@@ -179,6 +141,9 @@ export default function App() {
   const [viewerOpen, setViewerOpen] = useState(false);
   const [selectedMedia, setSelectedMedia] = useState<CapturedImage | RecordedVideo | null>(null);
   const [mediaType, setMediaType] = useState<'image' | 'video'>('image');
+
+  // --- CONFIG: Your Pi URL ---
+  const WHEP_URL = "http://192.168.1.92:8889/pi-cam-hires/whep";
 
   const systemOverviewData = {
     cameras: { active: 8, total: 10 },
@@ -189,9 +154,7 @@ export default function App() {
     falsePositives: 12,
   };
 
-  const alertLevel = currentRisks.some(
-    (r) => r.severity === "critical",
-  )
+  const alertLevel = currentRisks.some((r) => r.severity === "critical")
     ? "critical"
     : currentRisks.some((r) => r.severity === "high")
       ? "high"
@@ -206,13 +169,11 @@ export default function App() {
       setCurrentRisks(newRisks);
       setDetectedRisks(generateDetectedRisks(newRisks));
 
-      // Occasionally increment total detections
       if (Math.random() < 0.3) {
         setTotalDetections((prev) => prev + 1);
       }
     }, 8000);
 
-    // Initial data
     const initialRisks = generateMockRisks();
     setCurrentRisks(initialRisks);
     setDetectedRisks(generateDetectedRisks(initialRisks));
@@ -248,10 +209,12 @@ export default function App() {
       }
     } else {
       // Start recording
-      const stream = cameraFeedRef.current?.getStream();
+      // --- CHANGE 3: Use liveStreamRef to get the WebRTC stream ---
+      const stream = liveStreamRef.current?.getStream();
+      
       if (!stream) {
-        toast.error("Camera not ready", {
-          description: "Please wait for camera to initialize",
+        toast.error("Stream not ready", {
+          description: "Waiting for connection to Raspberry Pi...",
         });
         setIsRecording(false);
         return;
@@ -279,7 +242,7 @@ export default function App() {
           const duration = Math.floor((Date.now() - recordingStartTimeRef.current) / 1000);
 
           // Capture a thumbnail from current frame
-          const thumbnailUrl = cameraFeedRef.current?.captureFrame() || '';
+          const thumbnailUrl = liveStreamRef.current?.captureFrame() || '';
 
           const newVideo: RecordedVideo = {
             id: `video-${Date.now()}`,
@@ -294,7 +257,7 @@ export default function App() {
           setRecordedVideos((prev) => [
             newVideo,
             ...prev.slice(0, 4),
-          ]); // Keep last 5 videos
+          ]); 
 
           toast.success("Recording stopped", {
             description: `Video saved with ${detectedRisks.length} risk events recorded`,
@@ -302,7 +265,7 @@ export default function App() {
         };
 
         mediaRecorderRef.current = mediaRecorder;
-        mediaRecorder.start(1000); // Collect data every second
+        mediaRecorder.start(1000); 
 
         toast.success("Recording started", {
           description: "Video recording has begun",
@@ -310,7 +273,7 @@ export default function App() {
       } catch (error) {
         console.error('Error starting recording:', error);
         toast.error("Recording failed", {
-          description: "Unable to start video recording",
+          description: "Unable to start video recording (Browser permission issue?)",
         });
         setIsRecording(false);
       }
@@ -319,11 +282,12 @@ export default function App() {
 
   const handleCapture = () => {
     // Capture the current video frame
-    const imageUrl = cameraFeedRef.current?.captureFrame();
+    // --- CHANGE 4: Use liveStreamRef ---
+    const imageUrl = liveStreamRef.current?.captureFrame();
     
     if (!imageUrl) {
       toast.error("Capture failed", {
-        description: "Camera not ready for capture",
+        description: "Stream not ready for capture",
       });
       return;
     }
@@ -338,7 +302,7 @@ export default function App() {
     setCapturedImages((prev) => [
       newCapture,
       ...prev.slice(0, 4),
-    ]); // Keep last 5 captures
+    ]); 
 
     toast.success("Screenshot captured", {
       description: `Image saved with ${detectedRisks.length} detected risks`,
@@ -347,15 +311,10 @@ export default function App() {
 
   const handleEmergencyCall = () => {
     toast.error("Emergency Services Called", {
-      description:
-        "Critical risk detected - Emergency response initiated",
+      description: "Critical risk detected - Emergency response initiated",
       duration: 10000,
     });
-
-    // In a real system, this would initiate actual emergency call
-    console.log(
-      "Emergency call initiated due to critical risk detection",
-    );
+    console.log("Emergency call initiated due to critical risk detection");
   };
 
   const handleImageClick = (image: CapturedImage) => {
@@ -436,9 +395,7 @@ export default function App() {
                   <Button
                     onClick={handleEmergencyCall}
                     className="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-full shadow-lg border-2 border-red-500"
-                    style={{
-                      fontFamily: "Poppins, sans-serif",
-                    }}
+                    style={{ fontFamily: "Poppins, sans-serif" }}
                   >
                     <PhoneCall className="w-5 h-5 mr-2" />
                     EMERGENCY CALL
@@ -447,17 +404,13 @@ export default function App() {
                 <div className="text-right">
                   <div
                     className="text-red-400 text-sm font-medium"
-                    style={{
-                      fontFamily: "Poppins, sans-serif",
-                    }}
+                    style={{ fontFamily: "Poppins, sans-serif" }}
                   >
                     CRITICAL ALERT
                   </div>
                   <div
                     className="text-slate-400 text-xs"
-                    style={{
-                      fontFamily: "Poppins, sans-serif",
-                    }}
+                    style={{ fontFamily: "Poppins, sans-serif" }}
                   >
                     Immediate Response Required
                   </div>
@@ -469,15 +422,18 @@ export default function App() {
 
         {/* Main Grid Layout */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 auto-rows-max">
-          {/* Top Row - Camera Feed and Risk Detection */}
+          
+          {/* Top Row - Camera Feed (LiveStream) and Risk Detection */}
           <motion.div
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ delay: 0.2 }}
             className="lg:col-span-2 min-h-0"
           >
-            <CameraFeed
-              ref={cameraFeedRef}
+            {/* --- CHANGE 5: Render LiveStream instead of CameraFeed --- */}
+            <LiveStream
+              ref={liveStreamRef}
+              streamUrl={WHEP_URL}
               isRecording={isRecording}
               onToggleRecording={handleToggleRecording}
               onCapture={handleCapture}
@@ -525,7 +481,7 @@ export default function App() {
           </motion.div>
         </div>
 
-        {/* Floating Emergency Call Button - Alternative placement for mobile/smaller screens */}
+        {/* Floating Emergency Call Button */}
         {alertLevel === "critical" && (
           <motion.div
             initial={{ opacity: 0, y: 100 }}

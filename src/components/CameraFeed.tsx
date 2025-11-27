@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
 import { motion } from 'motion/react';
-import { ZoomIn, ZoomOut, Camera, Play, Pause, PlayCircle } from 'lucide-react';
+import { ZoomIn, ZoomOut, Camera, Play, Pause, PlayCircle, Loader2, WifiOff } from 'lucide-react';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
 import { ImageWithFallback } from './figma/ImageWithFallback';
 
+// --- Types ---
 interface RiskDetection {
   id: string;
   type: string;
@@ -32,7 +33,8 @@ interface RecordedVideo {
   videoUrl: string;
 }
 
-interface CameraFeedProps {
+interface LiveStreamProps {
+  streamUrl: string; // The WHEP URL (e.g. http://192.168.1.50:8889/pi-cam/whep)
   isRecording: boolean;
   onToggleRecording: () => void;
   onCapture: () => void;
@@ -43,26 +45,37 @@ interface CameraFeedProps {
   onVideoClick?: (video: RecordedVideo) => void;
 }
 
-export interface CameraFeedRef {
+export interface LiveStreamRef {
   captureFrame: () => string | null;
   getStream: () => MediaStream | null;
 }
 
-export const CameraFeed = forwardRef<CameraFeedRef, CameraFeedProps>(({ isRecording, onToggleRecording, onCapture, detectedRisks, capturedImages, recordedVideos, onImageClick, onVideoClick }, ref) => {
+// --- Component ---
+export const LiveStream = forwardRef<LiveStreamRef, LiveStreamProps>(({ 
+  streamUrl,
+  isRecording, 
+  onToggleRecording, 
+  onCapture, 
+  detectedRisks, 
+  capturedImages, 
+  recordedVideos, 
+  onImageClick, 
+  onVideoClick 
+}, ref) => {
   const [zoomLevel, setZoomLevel] = useState(1);
-  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'error'>('connecting');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
   const videoRef = useRef<HTMLVideoElement>(null);
+  const pcRef = useRef<RTCPeerConnection | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-  // Expose methods to parent component
+  // --- 1. Expose methods to parent (Capture & Stream Access) ---
   useImperativeHandle(ref, () => ({
     captureFrame: () => {
-      if (!videoRef.current || !videoRef.current.videoWidth) {
-        return null;
-      }
+      if (!videoRef.current || !videoRef.current.videoWidth) return null;
 
-      // Create canvas if it doesn't exist
       if (!canvasRef.current) {
         canvasRef.current = document.createElement('canvas');
       }
@@ -82,81 +95,142 @@ export const CameraFeed = forwardRef<CameraFeedRef, CameraFeedProps>(({ isRecord
     getStream: () => streamRef.current
   }));
 
+  // --- 2. WebRTC / WHEP Connection Logic ---
   useEffect(() => {
-    // Request camera access
-    const startCamera = async () => {
+    let isMounted = true;
+
+    const startStream = async () => {
+      if (!streamUrl) return;
+
+      setConnectionStatus('connecting');
+      setErrorMessage(null);
+
+      // Cleanup previous connection if exists
+      if (pcRef.current) {
+        pcRef.current.close();
+      }
+
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            facingMode: 'environment' // Use back camera on mobile devices
-          },
-          audio: false
+        const pc = new RTCPeerConnection({
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        });
+        pcRef.current = pc;
+
+        // Handle incoming stream
+        pc.ontrack = (event) => {
+          if (videoRef.current && event.streams[0]) {
+            videoRef.current.srcObject = event.streams[0];
+            streamRef.current = event.streams[0];
+            if (isMounted) setConnectionStatus('connected');
+          }
+        };
+
+        // We only want to RECEIVE video
+        pc.addTransceiver('video', { direction: 'recvonly' });
+
+        // Create Offer
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Exchange SDP with MediaMTX
+        const response = await fetch(streamUrl, {
+          method: 'POST',
+          body: offer.sdp,
+          headers: { 'Content-Type': 'application/sdp' },
         });
 
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          streamRef.current = stream;
+        if (!response.ok) {
+          throw new Error(`Connection failed: ${response.statusText}`);
         }
-        setCameraError(null);
-      } catch (error) {
-        console.error('Error accessing camera:', error);
-        setCameraError('Unable to access camera. Please grant camera permissions.');
+
+        const answerSdp = await response.text();
+        await pc.setRemoteDescription(
+          new RTCPeerConnection().createSessionDescription({
+            type: 'answer',
+            sdp: answerSdp,
+          })
+        );
+
+      } catch (err) {
+        console.error("WHEP Error:", err);
+        if (isMounted) {
+          setConnectionStatus('error');
+          setErrorMessage("Cannot connect to Camera. Check Raspberry Pi.");
+        }
       }
     };
 
-    startCamera();
+    startStream();
 
-    // Cleanup: stop camera when component unmounts
     return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
+      isMounted = false;
+      if (pcRef.current) {
+        pcRef.current.close();
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
       }
     };
-  }, []);
+  }, [streamUrl]);
 
-  const toggleZoom = () => {
-    setZoomLevel(prev => prev === 1 ? 2 : 1);
-  };
-
-  const resetToOriginal = () => {
-    setZoomLevel(1);
-  };
+  // --- 3. UI Helpers ---
+  const toggleZoom = () => setZoomLevel(prev => prev === 1 ? 2 : 1);
+  const resetToOriginal = () => setZoomLevel(1);
 
   return (
     <div className="space-y-4">
-      <div className="relative bg-slate-900 rounded-lg border border-slate-700">
-        {/* Camera Feed */}
-        <div className="relative aspect-video bg-slate-800 overflow-hidden">
+      <div className="relative bg-slate-900 rounded-lg border border-slate-700 shadow-xl">
+        
+        {/* Main Video Area */}
+        <div className="relative aspect-video bg-slate-950 overflow-hidden rounded-t-lg">
+          
+          {/* Loading / Error States */}
+          {connectionStatus !== 'connected' && (
+            <div className="absolute inset-0 z-20 flex flex-col items-center justify-center text-slate-400 bg-slate-900/90">
+              {connectionStatus === 'connecting' ? (
+                <>
+                  <Loader2 className="w-10 h-10 animate-spin mb-3 text-blue-500" />
+                  <p>Connecting to SafeSight Node...</p>
+                </>
+              ) : (
+                <>
+                  <WifiOff className="w-10 h-10 mb-3 text-red-500" />
+                  <p>{errorMessage || "Stream Offline"}</p>
+                  <Button 
+                    variant="link" 
+                    className="text-blue-400 mt-2"
+                    onClick={() => window.location.reload()} // Simple retry
+                  >
+                    Retry Connection
+                  </Button>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* The Video Feed */}
           <motion.div
             className="w-full h-full overflow-hidden"
             animate={{ scale: zoomLevel }}
             transition={{ duration: 0.3, ease: "easeInOut" }}
           >
-            {cameraError ? (
-              <div className="w-full h-full flex items-center justify-center">
-                <div className="text-center p-6">
-                  <Camera className="w-12 h-12 text-slate-500 mx-auto mb-3" />
-                  <p className="text-slate-400 text-sm">{cameraError}</p>
-                </div>
-              </div>
-            ) : (
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full object-cover"
-              />
-            )}
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+              controls={false}
+              className="w-full h-full object-cover"
+            />
           </motion.div>
 
-          {/* Risk Detection Overlays */}
-          {detectedRisks.map((risk) => (
+          {/* --- Overlays --- */}
+
+          {/* Risk Detection Boxes */}
+          {connectionStatus === 'connected' && detectedRisks.map((risk) => (
             <motion.div
               key={risk.id}
-              className="absolute border-2 border-red-500 bg-red-500/20"
+              className="absolute border-2 border-red-500 bg-red-500/10 z-10"
               style={{
                 left: `${risk.x}%`,
                 top: `${risk.y}%`,
@@ -167,8 +241,8 @@ export const CameraFeed = forwardRef<CameraFeedRef, CameraFeedProps>(({ isRecord
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.2 }}
             >
-              <div className="absolute -top-8 left-0">
-                <Badge variant="destructive" className="text-xs">
+              <div className="absolute -top-6 left-0">
+                <Badge variant="destructive" className="text-xs shadow-sm">
                   {risk.type} ({Math.round(risk.confidence)}%)
                 </Badge>
               </div>
@@ -178,241 +252,165 @@ export const CameraFeed = forwardRef<CameraFeedRef, CameraFeedProps>(({ isRecord
           {/* Recording Indicator */}
           {isRecording && (
             <motion.div
-              className="absolute top-4 right-4 flex items-center gap-2 bg-red-600 text-white px-3 py-1 rounded-full"
+              className="absolute top-4 right-4 flex items-center gap-2 bg-red-600/90 backdrop-blur-sm text-white px-3 py-1 rounded-full z-20 shadow-lg"
               animate={{ opacity: [1, 0.6, 1] }}
               transition={{ duration: 1, repeat: Infinity }}
             >
               <div className="w-2 h-2 bg-white rounded-full" />
-              <span className="text-sm">REC</span>
+              <span className="text-xs font-bold tracking-wider">REC</span>
             </motion.div>
           )}
 
-          {/* Camera Status */}
-          <div className="absolute top-4 left-4 flex items-center gap-2">
-            <Badge variant="secondary" className="bg-blue-600 text-white">
+          {/* Camera Info Badges */}
+          <div className="absolute top-4 left-4 flex items-center gap-2 z-20">
+            <Badge className="bg-blue-600/90 hover:bg-blue-600 text-white border-0 backdrop-blur-md">
               CAM-01
             </Badge>
-            <Badge variant="outline" className="bg-slate-800/80 text-slate-200 border-slate-600">
+            <Badge variant="outline" className="bg-slate-900/60 text-slate-200 border-slate-600 backdrop-blur-md">
               {zoomLevel === 1 ? 'Wide Angle' : `Zoom ${zoomLevel}x`}
             </Badge>
-            <Badge variant="outline" className="bg-green-600 text-white border-green-500">
-              LIVE
-            </Badge>
+            {connectionStatus === 'connected' && (
+              <Badge className="bg-green-500/90 hover:bg-green-500 text-white border-0 flex gap-1 items-center backdrop-blur-md">
+                <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"/>
+                LIVE
+              </Badge>
+            )}
           </div>
 
-          {/* Timestamp */}
-          <div className="absolute bottom-4 left-4">
-            <div className="bg-slate-800/80 text-slate-200 px-3 py-1 rounded text-sm font-mono">
-              {new Date().toLocaleString()}
-            </div>
+          {/* Timestamp Footer */}
+          <div className="absolute bottom-0 w-full bg-gradient-to-t from-slate-900/80 to-transparent p-4 z-20">
+             <div className="bg-slate-900/80 inline-block px-2 py-1 rounded text-xs font-mono text-slate-300 border border-slate-700/50">
+               {new Date().toLocaleString()}
+             </div>
           </div>
         </div>
       </div>
 
-      {/* Camera Controls */}
-      <div className="bg-slate-800 p-4 rounded-lg flex items-center justify-between">
+      {/* --- Controls Toolbar --- */}
+      <div className="bg-slate-800 p-3 rounded-lg flex items-center justify-between border border-slate-700">
         <div className="flex items-center gap-2">
           <Button
-            variant="outline"
+            variant="ghost"
             size="sm"
             onClick={toggleZoom}
-            className="bg-slate-700 border-slate-600 text-slate-200 hover:bg-slate-600"
+            className="text-slate-300 hover:text-white hover:bg-slate-700"
+            disabled={connectionStatus !== 'connected'}
           >
-            {zoomLevel === 1 ? (
-              <>
-                <ZoomIn className="w-4 h-4 mr-2" />
-                Zoom 2x
-              </>
-            ) : (
-              <>
-                <ZoomOut className="w-4 h-4 mr-2" />
-                Wide View
-              </>
-            )}
+            {zoomLevel === 1 ? <ZoomIn className="w-4 h-4 mr-2" /> : <ZoomOut className="w-4 h-4 mr-2" />}
+            {zoomLevel === 1 ? 'Zoom' : 'Reset'}
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={resetToOriginal}
-            className="bg-slate-700 border-slate-600 text-slate-200 hover:bg-slate-600"
-          >
-            Reset to 1x
-          </Button>
+          {zoomLevel > 1 && (
+            <Button variant="ghost" size="sm" onClick={resetToOriginal} className="text-slate-400 hover:text-white">
+              Reset
+            </Button>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
           <Button
-            variant="outline"
+            variant="default"
             size="sm"
             onClick={onCapture}
-            className="bg-blue-700 border-blue-600 text-white hover:bg-blue-600"
+            disabled={connectionStatus !== 'connected'}
+            className="bg-blue-600 hover:bg-blue-500 text-white"
           >
             <Camera className="w-4 h-4 mr-2" />
-            Capture
+            Snapshot
           </Button>
+          
           <Button
-            variant={isRecording ? "destructive" : "outline"}
+            variant={isRecording ? "destructive" : "secondary"}
             size="sm"
             onClick={onToggleRecording}
-            className={isRecording ? "" : "bg-slate-700 border-slate-600 text-slate-200 hover:bg-slate-600"}
+            disabled={connectionStatus !== 'connected'}
+            className={isRecording ? "animate-pulse" : "bg-slate-700 text-slate-200 hover:bg-slate-600"}
           >
             {isRecording ? <Pause className="w-4 h-4 mr-2" /> : <Play className="w-4 h-4 mr-2" />}
-            {isRecording ? 'Stop' : 'Record'}
+            {isRecording ? 'Stop Recording' : 'Record Stream'}
           </Button>
         </div>
       </div>
 
-      {/* Captured Media Gallery */}
+      {/* --- Captured Media Gallery (Unchanged Logic, visually tweaked) --- */}
       {(capturedImages.length > 0 || recordedVideos.length > 0) && (
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-          className="bg-slate-800 rounded-lg border border-slate-700 p-4"
+          className="bg-slate-800/50 rounded-lg border border-slate-700/50 p-4 mt-6"
         >
-          <h3 className="text-slate-200 text-sm font-medium mb-3 flex items-center gap-2" style={{ fontFamily: 'Poppins, sans-serif' }}>
-            <Camera className="w-4 h-4" />
-            Recent Captures & Recordings ({capturedImages.length + recordedVideos.length})
+          <h3 className="text-slate-300 text-sm font-semibold mb-4 flex items-center gap-2">
+            <Camera className="w-4 h-4 text-blue-400" />
+            Session History
+            <Badge variant="outline" className="ml-auto text-xs border-slate-600 text-slate-400">
+              {capturedImages.length + recordedVideos.length} Items
+            </Badge>
           </h3>
           
-          <div className="grid grid-cols-5 gap-3">
-            {/* Captured Images with Risk Overlays */}
+          <div className="grid grid-cols-4 md:grid-cols-5 lg:grid-cols-6 gap-3">
+            
+            {/* Images */}
             {capturedImages.map((capture, index) => (
               <motion.div
                 key={capture.id}
-                className="relative aspect-video bg-slate-700 rounded border border-slate-600 overflow-hidden cursor-pointer hover:border-blue-500 transition-colors"
-                initial={{ opacity: 0, scale: 0.8 }}
+                initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: index * 0.1 }}
-                whileHover={{ scale: 1.05 }}
+                transition={{ delay: index * 0.05 }}
+                className="group relative aspect-video bg-slate-900 rounded border border-slate-700 overflow-hidden cursor-pointer hover:ring-2 hover:ring-blue-500/50 transition-all"
                 onClick={() => onImageClick?.(capture)}
               >
-                <ImageWithFallback
-                  src={capture.imageUrl}
-                  alt={`Capture ${index + 1}`}
-                  className="w-full h-full object-cover"
-                />
+                <ImageWithFallback src={capture.imageUrl} alt="capture" className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
                 
-                {/* Risk Detection Overlays on Captured Images */}
-                {capture.risks.map((risk) => (
-                  <div
-                    key={`${capture.id}-${risk.id}`}
-                    className="absolute border border-red-400 bg-red-500/20"
-                    style={{
-                      left: `${risk.x}%`,
-                      top: `${risk.y}%`,
-                      width: `${risk.width}%`,
-                      height: `${risk.height}%`,
-                    }}
-                  >
-                    <div className="absolute -top-5 left-0">
-                      <Badge variant="destructive" className="text-xs px-1 py-0">
-                        {risk.type.split(' ')[0]} {Math.round(risk.confidence)}%
-                      </Badge>
-                    </div>
-                  </div>
-                ))}
-                
-                {/* Image indicator */}
+                {/* Image Badge */}
                 <div className="absolute top-1 left-1">
-                  <Badge variant="secondary" className="text-xs px-1 py-0 bg-blue-600 text-white" style={{ fontFamily: 'Poppins, sans-serif' }}>
-                    IMG
-                  </Badge>
+                  <Badge className="h-4 px-1 text-[9px] bg-blue-600/90 text-white border-0">IMG</Badge>
                 </div>
-                
-                {/* Risk count overlay */}
+
+                {/* Risk Badge */}
                 {capture.risks.length > 0 && (
-                  <div className="absolute top-1 right-1">
-                    <Badge variant="destructive" className="text-xs px-1 py-0">
-                      {capture.risks.length}
-                    </Badge>
-                  </div>
+                   <div className="absolute top-1 right-1">
+                     <Badge variant="destructive" className="h-4 px-1 text-[9px]">{capture.risks.length}</Badge>
+                   </div>
                 )}
                 
-                {/* Timestamp overlay */}
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-1">
-                  <div className="text-xs text-white font-mono">
-                    {capture.timestamp.toLocaleTimeString()}
-                  </div>
+                <div className="absolute bottom-0 w-full bg-black/60 p-1">
+                   <p className="text-[10px] text-slate-300 font-mono text-center">{capture.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})}</p>
                 </div>
               </motion.div>
             ))}
-            
-            {/* Recorded Videos */}
+
+            {/* Videos */}
             {recordedVideos.map((video, index) => (
               <motion.div
                 key={video.id}
-                className="relative aspect-video bg-slate-700 rounded border border-slate-600 overflow-hidden cursor-pointer hover:border-green-500 transition-colors group"
-                initial={{ opacity: 0, scale: 0.8 }}
+                initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: (capturedImages.length + index) * 0.1 }}
-                whileHover={{ scale: 1.05 }}
+                transition={{ delay: (capturedImages.length + index) * 0.05 }}
+                className="group relative aspect-video bg-slate-900 rounded border border-slate-700 overflow-hidden cursor-pointer hover:ring-2 hover:ring-green-500/50 transition-all"
                 onClick={() => onVideoClick?.(video)}
               >
-                <ImageWithFallback
-                  src={video.thumbnailUrl}
-                  alt={`Video ${index + 1}`}
-                  className="w-full h-full object-cover"
-                />
+                <ImageWithFallback src={video.thumbnailUrl} alt="video" className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition-opacity" />
                 
-                {/* Video play indicator */}
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <PlayCircle className="w-8 h-8 text-white opacity-70 group-hover:opacity-100 transition-opacity" />
+                  <PlayCircle className="w-8 h-8 text-white/80 group-hover:text-white group-hover:scale-110 transition-all shadow-lg" />
                 </div>
-                
-                {/* Video indicator */}
+
                 <div className="absolute top-1 left-1">
-                  <Badge variant="secondary" className="text-xs px-1 py-0 bg-green-600 text-white">
-                    VID
-                  </Badge>
+                  <Badge className="h-4 px-1 text-[9px] bg-green-600/90 text-white border-0">VID</Badge>
                 </div>
                 
-                {/* Duration */}
-                <div className="absolute top-1 right-1">
-                  <Badge variant="outline" className="text-xs px-1 py-0 bg-black/60 text-white border-white/20">
-                    {Math.floor(video.duration / 60)}:{(video.duration % 60).toString().padStart(2, '0')}
-                  </Badge>
-                </div>
-                
-                {/* Risk count overlay */}
-                {video.risks.length > 0 && (
-                  <div className="absolute top-6 right-1">
-                    <Badge variant="destructive" className="text-xs px-1 py-0">
-                      {video.risks.length} risks
-                    </Badge>
-                  </div>
-                )}
-                
-                {/* Timestamp overlay */}
-                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-1">
-                  <div className="text-xs text-white font-mono">
-                    {video.timestamp.toLocaleTimeString()}
-                  </div>
+                <div className="absolute bottom-0 w-full bg-black/60 p-1 flex justify-between px-2">
+                   <span className="text-[10px] text-slate-300 font-mono">{video.timestamp.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
+                   <span className="text-[10px] text-slate-300 font-mono">{video.duration}s</span>
                 </div>
               </motion.div>
             ))}
-          </div>
-          
-          {/* Media Summary */}
-          <div className="mt-4 pt-3 border-t border-slate-600 grid grid-cols-3 gap-4 text-center">
-            <div>
-              <div className="text-lg font-mono text-blue-400">{capturedImages.length}</div>
-              <div className="text-xs text-slate-400" style={{ fontFamily: 'Poppins, sans-serif' }}>Images</div>
-            </div>
-            <div>
-              <div className="text-lg font-mono text-green-400">{recordedVideos.length}</div>
-              <div className="text-xs text-slate-400" style={{ fontFamily: 'Poppins, sans-serif' }}>Videos</div>
-            </div>
-            <div>
-              <div className="text-lg font-mono text-red-400">
-                {capturedImages.reduce((sum, img) => sum + img.risks.length, 0) + 
-                 recordedVideos.reduce((sum, vid) => sum + vid.risks.length, 0)}
-              </div>
-              <div className="text-xs text-slate-400" style={{ fontFamily: 'Poppins, sans-serif' }}>Total Risks</div>
-            </div>
           </div>
         </motion.div>
       )}
     </div>
   );
 });
+
+LiveStream.displayName = 'LiveStream';
+
+export default LiveStream;
